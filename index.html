@@ -497,6 +497,7 @@ function computeActualPoints(matches){
 
 // ── MONTE CARLO WIN PROBABILITY ────────────────────────────────────────────
 function runMonteCarlo(allMatches, N=8000){
+  resolveBracket(allMatches);
   // All sweepstake teams
   const sweepTeams = new Set(DRAW.flatMap(p=>[p.t1.name,p.t2.name,p.t3.name]));
   const wins={};
@@ -506,33 +507,57 @@ function runMonteCarlo(allMatches, N=8000){
   const byGroup={};
   GROUP_ORDER.forEach(g=>byGroup[g]=[]);
   allMatches.forEach(m=>{ if(m.group){ const g=m.group.replace('Group ',''); if(byGroup[g]) byGroup[g].push(m);}});
+  const groupMatches=allMatches.filter(m=>m.group);
+  const groupsDone=groupMatches.length>0 && groupMatches.every(m=>m.score);
+  const byNum={};allMatches.forEach(m=>{if(m.num!=null)byNum[m.num]=m;});
+  const finalMatch=allMatches.find(m=>m.round==='Final');
+  const finalNum=finalMatch?finalMatch.num:104;
+  const isCode=v=>typeof v==='string'&&/^[WL]\d+$/.test(v);
+  function actualWinIdx(s){
+    if(s.p) return s.p[0]>=s.p[1]?0:1;
+    if(s.et) return s.et[0]>=s.et[1]?0:1;
+    return s.ft[0]>=s.ft[1]?0:1;
+  }
+  let memo;
+  function winOf(num){
+    if(memo[num]) return memo[num];
+    const m=byNum[num];
+    const t1=isCode(m.team1)?refOf(m.team1):m.team1;
+    const t2=isCode(m.team2)?refOf(m.team2):m.team2;
+    let w;
+    if(m.score){ w = actualWinIdx(m.score)===0 ? t1 : t2; }
+    else { w = simMatch(t1,t2); }
+    memo[num]={w, l:(w===t1?t2:t1)};
+    return memo[num];
+  }
+  function refOf(ref){ const r=winOf(parseInt(ref.slice(1),10)); return ref[0]==='W'?r.w:r.l; }
 
   for(let i=0;i<N;i++){
-    // Simulate each group
-    const groupWinners=[], groupRunnerUps=[], groupThirds=[];
-    GROUP_ORDER.forEach(g=>{
-      const gms=byGroup[g];
-      const standings=simGroup(gms);
-      groupWinners.push({g, team:standings[0]});
-      groupRunnerUps.push({g, team:standings[1]});
-      groupThirds.push({g, team:standings[2]});
-    });
-    // Simplified bracket: pick best 8 thirds from 12
-    // R32: 32 teams (12 winners + 12 runners-up + 8 best thirds)
-    const thirds=groupThirds.map(t=>t.team).sort((a,b)=>simStrength(b)-simStrength(a)).slice(0,8);
-    let r32=[...groupWinners.map(t=>t.team),...groupRunnerUps.map(t=>t.team),...thirds];
-    let round=r32;
-    while(round.length>1){
-      const next=[];
-      for(let j=0;j<round.length;j+=2){
-        const winner=simMatch(round[j],round[j+1]);
-        next.push(winner);
+    let champ;
+    if(groupsDone){
+      memo={};
+      champ = winOf(finalNum).w;   // walk the real knockout tree, respecting decided matches
+    } else {
+      // Group stage still under way — simulate each group (uses played results)
+      const groupWinners=[], groupRunnerUps=[], groupThirds=[];
+      GROUP_ORDER.forEach(g=>{
+        const standings=simGroup(byGroup[g]);
+        groupWinners.push(standings[0]);
+        groupRunnerUps.push(standings[1]);
+        groupThirds.push(standings[2]);
+      });
+      const thirds=groupThirds.sort((a,b)=>simStrength(b)-simStrength(a)).slice(0,8);
+      let round=[...groupWinners,...groupRunnerUps,...thirds];
+      while(round.length>1){
+        const next=[];
+        for(let j=0;j<round.length;j+=2) next.push(simMatch(round[j],round[j+1]));
+        round=next;
       }
-      round=next;
+      champ=round[0];
     }
-    if(round[0]&&wins[round[0]]!==undefined) wins[round[0]]++;
+    champ=canon(champ);
+    if(champ&&wins[champ]!==undefined) wins[champ]++;
   }
-  // Convert to %
   const pcts={};
   Object.keys(wins).forEach(t=>pcts[t]=+(wins[t]/N*100).toFixed(1));
   return pcts;
@@ -747,9 +772,10 @@ function buildBracket(){
     // Build score display incl. pens/ET annotation
     let s1='', s2='', note='';
     if(sc){
-      const ft=sc.ft||[null,null];
-      s1=ft[0]; s2=ft[1];
-      if(sc.p){ note=`pens ${sc.p[0]}–${sc.p[1]}`; }
+      // Show the score after extra time when a match went to ET; otherwise full time
+      const final = sc.et || sc.ft || [null,null];
+      s1=final[0]; s2=final[1];
+      if(sc.p){ note = sc.et ? `a.e.t. · pens ${sc.p[0]}–${sc.p[1]}` : `pens ${sc.p[0]}–${sc.p[1]}`; }
       else if(sc.et){ note='a.e.t.'; }
     }
     return `<div class="b-match">
@@ -832,7 +858,9 @@ function getClash(t1, t2){
 function renderMatchCard(m, status){
   const t1=m.team1, t2=m.team2;
   const sc=m.score, [g1,g2] = sc ? sc.ft : [null,null];
+  const [f1,f2] = sc ? (sc.et || sc.ft) : [null,null];
   const ht = sc && sc.ht ? `HT: ${sc.ht[0]}–${sc.ht[1]}` : '';
+  const koNote = sc ? (sc.p ? (sc.et ? `a.e.t. · pens ${sc.p[0]}–${sc.p[1]}` : `pens ${sc.p[0]}–${sc.p[1]}`) : (sc.et ? 'a.e.t.' : '')) : '';
   let statusHtml, scoreHtml, cardClass='';
   if(status.state==='live'){
     statusHtml = `<span class="lmc-status live">${Math.min(status.elapsed,90)}'</span>`;
@@ -840,7 +868,7 @@ function renderMatchCard(m, status){
     cardClass='is-live';
   } else if(status.state==='finished'){
     statusHtml = `<span class="lmc-status finished">Full Time</span>`;
-    scoreHtml = `<div class="lmc-score">${g1}–${g2}</div>${ht?`<div class="lmc-ht">${ht}</div>`:''}`;
+    scoreHtml = `<div class="lmc-score">${f1}–${f2}</div>${koNote?`<div class="lmc-ht">${koNote}</div>`:(ht?`<div class="lmc-ht">${ht}</div>`:'')}`;
     cardClass='is-finished';
   } else {
     statusHtml = `<span class="lmc-status upcoming">Upcoming</span>`;
